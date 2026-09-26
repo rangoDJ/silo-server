@@ -1432,6 +1432,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 	}
 	if accessGroupStore != nil {
 		accessGroupHandler = handlers.NewAccessGroupHandler(accessGroupStore)
+		accessGroupHandler.OnUserSessionsRevoked = deps.OnUserSessionsRevoked
 	}
 	if deps.DB != nil {
 		jobRepo := adminjob.NewRepository(deps.DB)
