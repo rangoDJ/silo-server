@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/Silo-Server/silo-server/internal/access"
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/historyimport"
 )
@@ -71,6 +72,96 @@ func (h *HistoryImportHandler) GetImportRun(ctx context.Context, userID int, run
 	run, err := h.service.GetRun(ctx, userID, runID)
 	if err != nil {
 		return nil, historyImportAPIError(err)
+	}
+	return run, nil
+}
+
+// HistoryImportActor is who is acting on the account's history imports: the
+// account, the profile the request acts as, and the check a PIN-locked
+// primary profile must pass before it may manage other profiles.
+type HistoryImportActor struct {
+	UserID        int
+	ProfileID     string
+	VerifyProfile func(profileID string) error
+}
+
+// historyImportsForAnyProfile reports whether actor may import into, and see
+// the runs of, every profile on the account: a server admin, or the primary
+// profile (PIN-verified when it has one), as for other household management.
+// Every other profile acts only for itself.
+func (h *HistoryImportHandler) historyImportsForAnyProfile(ctx context.Context, actor HistoryImportActor) (bool, error) {
+	if apimw.IsAdmin(ctx) {
+		return true, nil
+	}
+	if actor.ProfileID == "" {
+		return false, nil
+	}
+	store, err := h.service.UserStore(ctx, actor.UserID)
+	if err != nil {
+		return false, err
+	}
+	verify := actor.VerifyProfile
+	if verify == nil {
+		verify = func(string) error { return access.ErrProfileUnverified }
+	}
+	allowed, err := canManageHouseholdAs(ctx, store, actor.ProfileID, verify)
+	if errors.Is(err, access.ErrProfileUnverified) {
+		return false, nil
+	}
+	return allowed, err
+}
+
+// CreateImportRunAs is CreateImportRun for the v2 route, which enforces the
+// profile rule: a profile imports only into itself unless it may manage the
+// household.
+func (h *HistoryImportHandler) CreateImportRunAs(ctx context.Context, actor HistoryImportActor, input historyimport.CreateRunInput) (*historyimport.Run, error) {
+	if input.ProfileID != actor.ProfileID || actor.ProfileID == "" {
+		anyProfile, err := h.historyImportsForAnyProfile(ctx, actor)
+		if err != nil {
+			return nil, &APIError{Status: http.StatusInternalServerError, Code: policyErrorInternal,
+				Message: "Failed to check profile permissions", cause: err}
+		}
+		if !anyProfile {
+			return nil, apiError(http.StatusForbidden, "forbidden",
+				"Only the primary profile can import watch history into another profile")
+		}
+	}
+	return h.CreateImportRun(ctx, actor.UserID, input)
+}
+
+// ListImportRunsPageAs is ListImportRunsPage for the v2 route: a profile that
+// may not manage the household sees only the runs that write into itself.
+func (h *HistoryImportHandler) ListImportRunsPageAs(ctx context.Context, actor HistoryImportActor, after *historyimport.RunKey, limit int) ([]historyimport.Run, bool, error) {
+	anyProfile, err := h.historyImportsForAnyProfile(ctx, actor)
+	if err != nil {
+		return nil, false, err
+	}
+	if anyProfile {
+		return h.service.ListRunsPage(ctx, actor.UserID, after, limit)
+	}
+	if actor.ProfileID == "" {
+		return nil, false, nil
+	}
+	return h.service.ListRunsPageForProfile(ctx, actor.UserID, actor.ProfileID, after, limit)
+}
+
+// GetImportRunAs is GetImportRun for the v2 route: another profile's run is
+// reported as not found, as another account's run is.
+func (h *HistoryImportHandler) GetImportRunAs(ctx context.Context, actor HistoryImportActor, runID string) (*historyimport.Run, error) {
+	run, err := h.GetImportRun(ctx, actor.UserID, runID)
+	if err != nil {
+		return nil, err
+	}
+	if run.ProfileID == actor.ProfileID && actor.ProfileID != "" {
+		return run, nil
+	}
+	anyProfile, err := h.historyImportsForAnyProfile(ctx, actor)
+	if err != nil {
+		return nil, &APIError{Status: http.StatusInternalServerError, Code: policyErrorInternal,
+			Message: "Failed to check profile permissions", cause: err}
+	}
+	if !anyProfile {
+		return nil, historyImportAPIError(historyimport.ErrRunNotFound)
 	}
 	return run, nil
 }
