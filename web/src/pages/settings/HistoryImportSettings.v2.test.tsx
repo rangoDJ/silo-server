@@ -180,3 +180,18 @@ it("explains a refused import into another profile", () => {
       ),
   ).toBe(true);
 });
+
+it("keeps the server's message for a refused import by the primary profile", () => {
+  state.primary = true;
+  state.createError = new V2ProblemError("createHistoryImportRun", {
+    type: "https://silo.example/problems/forbidden",
+    title: "Forbidden",
+    status: 403,
+    detail: "Verify the primary profile PIN to import into another profile",
+    instance: "/api/v2/history-imports/runs",
+  });
+  renderPage();
+  const alerts = screen.getAllByRole("alert").map((alert) => alert.textContent ?? "");
+  expect(alerts.some((text) => text.includes("This profile can only import"))).toBe(false);
+  expect(alerts.some((text) => text.includes(state.createError!.message))).toBe(true);
+});

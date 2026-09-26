@@ -664,7 +664,11 @@ export default function HistoryImportSettings() {
         </div>
         {startError && (
           <p role="alert" className="text-destructive text-sm">
-            {startError instanceof V2ProblemError && startError.status === 403
+            {/* The cross-profile rule only limits profiles that import for themselves;
+                a 403 for anyone else (demo mode, an unverified PIN) keeps its own message. */}
+            {!canImportForOthers &&
+            startError instanceof V2ProblemError &&
+            startError.status === 403
               ? "This profile can only import watch history into itself. Ask the primary profile to import into other profiles."
               : startError.message}
           </p>
