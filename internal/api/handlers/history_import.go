@@ -76,6 +76,10 @@ func (h *HistoryImportHandler) GetImportRun(ctx context.Context, userID int, run
 	return run, nil
 }
 
+// historyImportPermissionCheckFailed reports that the profile rule couldn't be
+// evaluated, as other profile-permission checks word it.
+const historyImportPermissionCheckFailed = "Failed to check profile permissions"
+
 // HistoryImportActor is who is acting on the account's history imports: the
 // account, the profile the request acts as, and the check a PIN-locked
 // primary profile must pass before it may manage other profiles.
@@ -119,7 +123,7 @@ func (h *HistoryImportHandler) CreateImportRunAs(ctx context.Context, actor Hist
 		anyProfile, err := h.historyImportsForAnyProfile(ctx, actor)
 		if err != nil {
 			return nil, &APIError{Status: http.StatusInternalServerError, Code: policyErrorInternal,
-				Message: "Failed to check profile permissions", cause: err}
+				Message: historyImportPermissionCheckFailed, cause: err}
 		}
 		if !anyProfile {
 			return nil, apiError(http.StatusForbidden, "forbidden",
@@ -158,7 +162,7 @@ func (h *HistoryImportHandler) GetImportRunAs(ctx context.Context, actor History
 	anyProfile, err := h.historyImportsForAnyProfile(ctx, actor)
 	if err != nil {
 		return nil, &APIError{Status: http.StatusInternalServerError, Code: policyErrorInternal,
-			Message: "Failed to check profile permissions", cause: err}
+			Message: historyImportPermissionCheckFailed, cause: err}
 	}
 	if !anyProfile {
 		return nil, historyImportAPIError(historyimport.ErrRunNotFound)

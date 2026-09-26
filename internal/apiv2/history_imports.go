@@ -354,7 +354,7 @@ func (reg *Registry) listHistoryImportRuns(ctx context.Context, cursors *Cursors
 		// The acting profile is part of the scope: which runs a page holds
 		// depends on it, so a cursor must not carry across profiles.
 		Security:   strconv.Itoa(userID) + ":" + profileFrom(ctx),
-		Sort:       "-created_at,-id",
+		Sort:       loginSessionCursorSort,
 		Tiebreaker: "id",
 	}
 	var after *historyimport.RunKey
