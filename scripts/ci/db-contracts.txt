@@ -51,6 +51,8 @@
 ./internal/scanner TestFinalizeVariantsKeepsMatchSuppressionDB
 ./internal/scanner TestFinalizeVariantsRetotalsPartsLeftByARenameDB
 ./internal/scanner TestFinalizeVariantsReadsWholeGroupFoundOutsideTheScopeDB
+./internal/scanner TestFinalizeVariantsPagesTheScopeDB
+./internal/scanner TestFinalizeVariantsRereadsOwnerLinkedBetweenPagesDB
 ./internal/scanner TestScanKeepsFileRowAcrossRenameDB
 ./internal/scanner TestScanLeavesOutFilesWithoutVideoDB
 ./internal/scanner TestScanFileRetiresFileWithoutVideoDB
