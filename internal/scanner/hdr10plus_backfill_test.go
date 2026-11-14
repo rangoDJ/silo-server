@@ -308,9 +308,10 @@ func TestHDR10PlusBackfillLeavesARowRewrittenDuringTheReadDB(t *testing.T) {
 }
 
 // A file whose read decodes no frame fails the same way on every pass, so it
-// waits a day before it is read again (#3606). The wait records only a time:
-// the file stays unchecked, and a later read that decodes a frame records its
-// status and drops the wait.
+// waits a day before it is read again, or until it changes on disk (#3606).
+// The wait is kept outside media_files, so recording it is not a change to
+// the file, and a later read that decodes a frame records its status and
+// drops the wait.
 func TestHDR10PlusBackfillWaitsADayAfterANoFrameReadDB(t *testing.T) {
 	pool := newScannerTestPool(t)
 	ctx := context.Background()
@@ -331,18 +332,24 @@ func TestHDR10PlusBackfillWaitsADayAfterANoFrameReadDB(t *testing.T) {
 		}
 		return firstVideoFrame{SideData: []ffprobeSideData{{SideDataType: "HDR Dynamic Metadata SMPTE2094-40 (HDR10+)"}}, ColorRange: "tv"}, nil
 	}
-	updatedAt := func() time.Time {
+	row := func() (tracks string, updatedAt time.Time) {
 		t.Helper()
-		var at time.Time
-		if err := pool.QueryRow(ctx, `SELECT updated_at FROM media_files WHERE id = $1`, fileID).Scan(&at); err != nil {
+		if err := pool.QueryRow(ctx, `SELECT video_tracks::text, updated_at FROM media_files WHERE id = $1`, fileID).Scan(&tracks, &updatedAt); err != nil {
 			t.Fatal(err)
 		}
-		return at
+		return tracks, updatedAt
 	}
-	markRead := func(ago time.Duration) {
+	waiting := func() bool {
 		t.Helper()
-		at := time.Now().Add(-ago).UTC().Format(hdr10PlusNoFrameTimeLayout)
-		if _, err := pool.Exec(ctx, `UPDATE media_files SET video_tracks = jsonb_set(video_tracks, '{0,`+hdr10PlusNoFrameKey+`}', to_jsonb($2::text)) WHERE id = $1`, fileID, at); err != nil {
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM hdr10_plus_backfill_no_frame WHERE media_file_id = $1`, fileID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n > 0
+	}
+	readAgo := func(ago time.Duration) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `UPDATE hdr10_plus_backfill_no_frame SET read_at = now() - $2 * interval '1 second' WHERE media_file_id = $1`, fileID, int64(ago/time.Second)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -357,26 +364,39 @@ func TestHDR10PlusBackfillWaitsADayAfterANoFrameReadDB(t *testing.T) {
 		}
 	}
 
-	before := updatedAt()
+	tracksBefore, updatedBefore := row()
 	pass(1)
-	track := readHDR10PlusBackfillTrack(t, ctx, pool, fileID)
-	if _, checked := track["hdr10_plus"]; checked || track[hdr10PlusNoFrameKey] == nil {
-		t.Fatalf("track after a no-frame read = %v, want it unchecked with the read time", track)
+	// Anything that compares the row, such as the catalog change trigger,
+	// must see no change.
+	if tracks, updated := row(); tracks != tracksBefore || !updated.Equal(updatedBefore) {
+		t.Fatalf("recording the no-frame read changed the file row: video_tracks %s, updated_at changed %v", tracks, !updated.Equal(updatedBefore))
 	}
-	if !updatedAt().Equal(before) {
-		t.Fatal("recording the no-frame read changed updated_at")
+	if !waiting() {
+		t.Fatal("the no-frame read recorded no wait")
 	}
 
 	pass(0)
-	markRead(23 * time.Hour)
+	readAgo(23 * time.Hour)
 	pass(0)
+	readAgo(25 * time.Hour)
+	pass(1)
 
-	markRead(25 * time.Hour)
+	// The wait belongs to the file revision that was read: another revision
+	// is read on the next pass.
+	resize := func(by int) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `UPDATE media_files SET file_size = file_size + $2 WHERE id = $1`, fileID, by); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resize(1)
+	pass(1)
+	resize(-1)
 	decodes = true
 	pass(1)
-	track = readHDR10PlusBackfillTrack(t, ctx, pool, fileID)
-	if _, waiting := track[hdr10PlusNoFrameKey]; track["hdr10_plus"] != true || waiting {
-		t.Fatalf("track after a read that decoded = %v, want hdr10_plus true and no read time", track)
+	track := readHDR10PlusBackfillTrack(t, ctx, pool, fileID)
+	if track["hdr10_plus"] != true || waiting() {
+		t.Fatalf("after a read that decoded: track %v, wait kept %v; want hdr10_plus true and no wait", track, waiting())
 	}
 }
 

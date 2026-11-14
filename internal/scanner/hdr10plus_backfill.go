@@ -30,17 +30,13 @@ const (
 	// hdr10PlusPrimaryVideoStream selects the first video stream that is not
 	// cover art, the stream the scanner stores as the first video track.
 	hdr10PlusPrimaryVideoStream = "V:0"
-	// hdr10PlusNoFrameKey, on the first video track, holds when a read last
-	// decoded no frame, as a fixed-width UTC timestamp so the candidate query
-	// compares it as text. A scan that reprobes the file rewrites the track
-	// without it, and a later successful read removes it.
-	hdr10PlusNoFrameKey = "hdr10_plus_no_frame_at"
 	// hdr10PlusNoFrameRetryAfter is how long a file whose read decoded no
-	// frame waits before it is read again. Such a file fails the same way on
-	// every pass, often over a network mount, but a fixed ffprobe or decoder
-	// still reaches it within a day.
+	// frame waits before it is read again, unless it changes on disk. Such a
+	// file fails the same way on every pass, often over a network mount, but
+	// a fixed ffprobe or decoder still reaches it within a day. The wait is a
+	// row in hdr10_plus_backfill_no_frame, kept out of video_tracks so it does
+	// not count as a change to the file.
 	hdr10PlusNoFrameRetryAfter = 24 * time.Hour
-	hdr10PlusNoFrameTimeLayout = "2006-01-02T15:04:05Z"
 )
 
 // errHDR10PlusStorageStalled ends a pass whose frame reads keep timing out.
@@ -251,9 +247,15 @@ func (b *HDR10PlusBackfiller) loadCandidates(ctx context.Context, afterID int) (
 		  AND jsonb_typeof(mf.video_tracks->0) = 'object'
 		  AND lower(COALESCE(mf.video_tracks->0->>'color_transfer', '')) LIKE '%smpte2084%'
 		  AND NOT (mf.video_tracks->0 ?& ARRAY['hdr10_plus', 'frame_color_range'])
-		  AND COALESCE(mf.video_tracks->0->>'`+hdr10PlusNoFrameKey+`', '') < $3
+		  AND NOT EXISTS (
+			SELECT 1 FROM hdr10_plus_backfill_no_frame nf
+			WHERE nf.media_file_id = mf.id
+			  AND nf.file_size = mf.file_size
+			  AND nf.file_modified_at IS NOT DISTINCT FROM mf.file_modified_at
+			  AND nf.read_at > now() - $3 * interval '1 second'
+		  )
 		ORDER BY mf.id
-		LIMIT $2`, afterID, b.batch, time.Now().Add(-hdr10PlusNoFrameRetryAfter).UTC().Format(hdr10PlusNoFrameTimeLayout))
+		LIMIT $2`, afterID, b.batch, int64(hdr10PlusNoFrameRetryAfter/time.Second))
 	if err != nil {
 		return nil, afterID, 0, fmt.Errorf("loading HDR10+ backfill candidates: %w", err)
 	}
@@ -343,9 +345,12 @@ func (b *HDR10PlusBackfiller) backfillFile(ctx context.Context, c hdr10PlusCandi
 	// hdr10_plus and for an HDR10+ file video_range_type, on the first track,
 	// so fields this binary does not know survive. Write only over the exact
 	// row that was read: the same file revision and the same first track. A
-	// scan that rewrote the row in the meantime read the frame itself. A
-	// no-frame mark from an earlier read goes.
+	// scan that rewrote the row in the meantime read the frame itself. The
+	// same statement drops the wait an earlier no-frame read left.
 	tag, err := b.pool.Exec(ctx, `
+		WITH cleared AS (
+			DELETE FROM hdr10_plus_backfill_no_frame WHERE media_file_id = $1
+		)
 		UPDATE media_files
 		SET video_tracks = jsonb_set(
 		        CASE WHEN video_tracks->0 ? 'hdr10_plus' THEN video_tracks
@@ -353,7 +358,7 @@ func (b *HDR10PlusBackfiller) backfillFile(ctx context.Context, c hdr10PlusCandi
 		            THEN jsonb_set(jsonb_set(video_tracks, '{0,hdr10_plus}', 'true'::jsonb), '{0,video_range_type}', to_jsonb($6::text))
 		            ELSE jsonb_set(video_tracks, '{0,hdr10_plus}', 'false'::jsonb)
 		        END,
-		        '{0,frame_color_range}', to_jsonb($7::text)) #- '{0,`+hdr10PlusNoFrameKey+`}',
+		        '{0,frame_color_range}', to_jsonb($7::text)),
 		    updated_at = NOW()
 		WHERE id = $1
 		  AND file_size = $2
@@ -369,21 +374,26 @@ func (b *HDR10PlusBackfiller) backfillFile(ctx context.Context, c hdr10PlusCandi
 	return outcome, nil
 }
 
-// recordNoFrame marks a file whose read decoded no frame, so passes in the
+// recordNoFrame records that a file's read decoded no frame, so passes in the
 // next hdr10PlusNoFrameRetryAfter skip it. Such a file fails the same way
 // every time; ffprobe ran and opened it, so this is not the storage or a
-// broken binary. The mark holds only a time, never a status, and goes on the
-// exact row that was read. It leaves updated_at alone: nothing a client sees
-// changed.
+// broken binary. The row holds only a time, never a status, and is keyed to
+// the file revision of the exact row that was read. media_files is not
+// written: nothing about the file changed.
 func (b *HDR10PlusBackfiller) recordNoFrame(ctx context.Context, c hdr10PlusCandidate) (hdr10PlusOutcome, error) {
 	tag, err := b.pool.Exec(ctx, `
-		UPDATE media_files
-		SET video_tracks = jsonb_set(video_tracks, '{0,`+hdr10PlusNoFrameKey+`}', to_jsonb($5::text))
+		INSERT INTO hdr10_plus_backfill_no_frame (media_file_id, file_size, file_modified_at, read_at)
+		SELECT id, file_size, file_modified_at, now()
+		FROM media_files
 		WHERE id = $1
 		  AND file_size = $2
 		  AND date_trunc('microseconds', file_modified_at) IS NOT DISTINCT FROM $3::timestamptz
-		  AND video_tracks->0 = $4::jsonb`,
-		c.id, c.size, c.normalizedModifiedAt(), c.trackJSON, time.Now().UTC().Format(hdr10PlusNoFrameTimeLayout))
+		  AND video_tracks->0 = $4::jsonb
+		ON CONFLICT (media_file_id) DO UPDATE SET
+			file_size = EXCLUDED.file_size,
+			file_modified_at = EXCLUDED.file_modified_at,
+			read_at = EXCLUDED.read_at`,
+		c.id, c.size, c.normalizedModifiedAt(), c.trackJSON)
 	if err != nil {
 		return 0, fmt.Errorf("recording HDR10+ frame read failure for file %d: %w", c.id, err)
 	}
