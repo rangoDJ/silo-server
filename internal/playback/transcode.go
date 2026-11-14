@@ -643,6 +643,11 @@ func (s *TranscodeSession) monitorFFmpeg(ctx context.Context, cmd *exec.Cmd, don
 		}()
 	}
 	waitErr := cmd.Wait()
+	if s.copyGroups != nil && ctx.Err() != nil {
+		// Stopped to replace or close the session, not finished: nothing
+		// waits for the groups it copied ahead.
+		s.copyGroups.stopRun()
+	}
 	// The child no longer owns the device once Wait returns. Release before
 	// flushing/logging so slow diagnostics cannot make the allocator count a
 	// process that has already exited.

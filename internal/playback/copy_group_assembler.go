@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/playback/keyframes"
@@ -55,6 +56,10 @@ type copyGroupAssembler struct {
 	haveTimeline bool
 	// timelineSet closes once the timeline is known.
 	timelineSet chan struct{}
+	// stopped is set when the current run's FFmpeg was stopped to replace or
+	// close the session (stopRun). It is read without mu, so a scan already
+	// assembling gives up between segments.
+	stopped atomic.Bool
 }
 
 // copyGroupRun is one FFmpeg run's progress.
@@ -161,6 +166,7 @@ func (a *copyGroupAssembler) startRun(startSegment int, audioKey string, generat
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.removeGroupsLocked()
+	a.stopped.Store(false)
 	if a.audioKey != audioKey {
 		a.audioKey = audioKey
 		for n, done := range a.assembled {
@@ -229,6 +235,14 @@ func (a *copyGroupAssembler) watch(done <-chan struct{}, stop func()) error {
 	}
 }
 
+// stopRun stops assembling the current run, whose FFmpeg was stopped to
+// replace or close the session. FFmpeg can copy well ahead of the assembler,
+// and joining the groups it wrote ahead would hold up the restart that
+// replaces the run for nothing: the next run's startRun removes them.
+func (a *copyGroupAssembler) stopRun() {
+	a.stopped.Store(true)
+}
+
 // scan reads the run's new groups and assembles every segment whose groups
 // are all present. It returns the error that stops the run's assembly, once.
 // The final scan, after FFmpeg exits, anchors a run that wrote one group.
@@ -239,7 +253,9 @@ func (a *copyGroupAssembler) scan(final bool) error {
 	if run == nil || run.broken {
 		return nil
 	}
-	for {
+	// A stopped run still reads groups until it is anchored: its first
+	// groups may set the session's timeline (awaitTimeline).
+	for !a.stopped.Load() || !run.anchored {
 		name := fmt.Sprintf("%s%06d.m4s", run.prefix, run.nextFile)
 		path := filepath.Join(a.dir, name)
 		data, err := os.ReadFile(filepath.Clean(path))
@@ -422,6 +438,9 @@ func (a *copyGroupAssembler) assembleLocked(run *copyGroupRun) error {
 	}
 	sort.Ints(segments)
 	for _, n := range segments {
+		if a.stopped.Load() {
+			return nil
+		}
 		if run.pruned[n] {
 			a.dropGroupsLocked(run, n)
 			continue
