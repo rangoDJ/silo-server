@@ -401,14 +401,23 @@ var errEpisodeBudgetSpent = errors.New("episode share of the run's time limit sp
 // as a scheduled run with a max runtime, so the episodes cannot use the whole
 // run and leave none for the movies after them. It reserves the movie budget
 // before the deadline, or half the time left when that is shorter. A run
-// without a deadline gets ctx unchanged.
+// without a deadline, or with no movie to analyze, gets ctx unchanged.
 func (a *Analyzer) episodeContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	deadline, ok := ctx.Deadline()
-	if !ok {
+	if !ok || !a.moviesPending(ctx) {
 		return ctx, func() {}
 	}
 	reserve := min(a.movieRunBudget(), time.Until(deadline)/2)
 	return context.WithDeadlineCause(ctx, deadline.Add(-reserve), errEpisodeBudgetSpent)
+}
+
+// moviesPending reports whether the movie pass would list a movie, so a
+// server whose movies need no analysis, such as one with only TV libraries,
+// gives its episodes the whole run. A failed lookup counts as pending; the
+// movie pass then reports the error.
+func (a *Analyzer) moviesPending(ctx context.Context) bool {
+	candidates, _, err := a.repo.ListMovieCandidates(ctx, a.nodeName(), nil, 1)
+	return err != nil || len(candidates) > 0
 }
 
 // runEpisodeShare runs the episodes under episodeCtx, from episodeContext,

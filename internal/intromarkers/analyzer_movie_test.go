@@ -485,20 +485,26 @@ func TestRunLeavesMoviesTheirShareOfTheDeadline(t *testing.T) {
 		cancelAt time.Duration
 		// cancelAsShareEnds cancels the run as the episodes' share ends.
 		cancelAsShareEnds bool
-		episodesErr       error
-		wantErr           error
-		wantMovies        int
-		wantSpent         bool
+		// noMovies leaves the movie pass nothing to analyze.
+		noMovies    bool
+		episodesErr error
+		wantErr     error
+		wantMovies  int
+		wantSpent   bool
 	}{
 		{name: "episode share spent", run: run, wantMovies: 1, wantSpent: true},
 		{name: "episode pass alone leaves the movie share", run: runEpisodes, wantSpent: true},
 		{name: "repository error at the end of the share", run: run, episodesErr: errDatabase, wantErr: errDatabase},
 		{name: "canceled during episodes", run: run, cancelAt: 50 * time.Millisecond, wantErr: context.Canceled},
 		{name: "episode pass alone canceled as its share ends", run: runEpisodes, cancelAsShareEnds: true, wantErr: context.Canceled, wantSpent: true},
+		{name: "no movies to analyze leaves the episodes the whole run", run: run, noMovies: true, wantErr: context.DeadlineExceeded},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			repo := &fakeIntroRepository{enabledLibraries: 1, movieCandidates: []Candidate{movieCandidate(10, 7200)}}
+			if tc.noMovies {
+				repo.movieCandidates = nil
+			}
 			sampler := &fakeMovieSampler{}
 			analyzer := movieAnalyzer(repo, sampler)
 			analyzer.repo = stallingEpisodes{fakeIntroRepository: repo, err: tc.episodesErr}

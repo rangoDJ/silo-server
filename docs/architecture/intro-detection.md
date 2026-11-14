@@ -464,7 +464,8 @@ it finished, reports `episode_budget_exhausted`, and the movie pass runs. A
 server without Chromaprint, which runs its episodes and then a separate movie
 pass under the cluster lock, leaves the same share when credits are on, even
 if another server then holds the lock and runs the movies. A run without a
-deadline gives the episodes as long as they take. Run summaries count
+deadline, or one whose movie pass would list no movie, gives the episodes as
+long as they take. Run summaries count
 `movies_considered` (the movies the run listed) and
 `movie_credits_markers_written`; the credits tail counters include movies.
 

@@ -24,7 +24,8 @@ Concurrent local starts conflict. Another server has its own worker state.
 execution; completed effects remain. Neither operation automatically retries.
 While a task is `running` or `cancelling` on the responding process, its
 `started_at` reports when that run started; `last_execution` still describes
-the previous finished run. The frozen v1 task routes do not report it.
+the previous finished run. The realtime `task.updated` event and the events
+WebSocket's task snapshot do not carry it; refetch the task to read it.
 
 The `refresh_all_library_metadata` task runs a `full` library metadata refresh
 (see [libraries-api.md](libraries-api.md)) for each enabled library in turn,
