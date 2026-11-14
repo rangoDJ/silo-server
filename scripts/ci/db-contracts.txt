@@ -479,6 +479,9 @@
 ./internal/downloads TestFailedPreparationRefreshIsSharedPostgres
 ./internal/downloads TestPreparationControlsPauseResumeAndCancel
 ./internal/downloads TestDownloadLinkedToCanceledPreparationFails
+./internal/downloads TestDeletingTheLastDownloadStopsItsPreparationDB
+./internal/downloads TestLateCompletionStopsItsPreparationDB
+./internal/downloads TestStaleAbandonedPreparationsAreRetiredNotClaimedDB
 ./internal/userstore/pgstore TestPostgresClearResumePosition
 ./internal/userstore/pgstore TestPostgresCollectionContinuation
 ./internal/userstore/pgstore TestPostgresFailedSyncKeepsANewerResult
