@@ -673,8 +673,7 @@ func TestItemRefreshExecutorCompleteRefreshWaitsForTheRelink(t *testing.T) {
 func TestItemRefreshExecutorCompleteRefreshWaitsForTheSeriesMatch(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		run := func(pendingReads int, wait time.Duration) (*ItemRefreshResult, *itemRefreshTestItemStatuses, error) {
-			statuses := &itemRefreshTestItemStatuses{pendingReads: pendingReads}
+		run := func(statuses *itemRefreshTestItemStatuses, wait time.Duration) (*ItemRefreshResult, *itemRefreshTestItemStatuses, error) {
 			executor := NewItemRefreshExecutor(
 				&itemRefreshTestFolderRepo{folder: &models.MediaFolder{ID: 7, Enabled: true, Paths: []string{"/media/tv"}}},
 				&itemRefreshTestFileRepo{filesByPath: []*models.MediaFile{{ContentID: "new-id", FilePath: "/media/tv/Title/Title S01E01.mkv"}}},
@@ -690,25 +689,35 @@ func TestItemRefreshExecutorCompleteRefreshWaitsForTheSeriesMatch(t *testing.T) 
 			return result, statuses, err
 		}
 
-		result, statuses, err := run(2, 5*time.Second)
+		result, statuses, err := run(&itemRefreshTestItemStatuses{pendingReads: 2}, 5*time.Second)
 		if err != nil || result.RefreshContentID != "new-id" || statuses.reads < 3 {
 			t.Fatalf("matched after %d status reads: result %+v, err %v; want new-id after the 3rd", statuses.reads, result, err)
 		}
-		if _, _, err := run(1_000, 50*time.Millisecond); !errors.Is(err, errRebuiltItemMatching) {
+		// A skeleton merged away between the file read and the status read
+		// has no status; the refresh reads the scope again.
+		result, statuses, err = run(&itemRefreshTestItemStatuses{goneReads: 2}, 5*time.Second)
+		if err != nil || result.RefreshContentID != "new-id" || statuses.reads < 3 {
+			t.Fatalf("item gone for %d status reads: result %+v, err %v; want new-id after the 3rd", statuses.reads, result, err)
+		}
+		if _, _, err := run(&itemRefreshTestItemStatuses{pendingReads: 1_000}, 50*time.Millisecond); !errors.Is(err, errRebuiltItemMatching) {
 			t.Fatalf("never matched: err = %v, want errRebuiltItemMatching", err)
 		}
 	})
 }
 
-// itemRefreshTestItemStatuses reports every item as pending for its first
-// pendingReads reads, then as matched.
+// itemRefreshTestItemStatuses reports no item for its first goneReads reads,
+// every item as pending for its first pendingReads reads, then as matched.
 type itemRefreshTestItemStatuses struct {
+	goneReads    int
 	pendingReads int
 	reads        int
 }
 
 func (r *itemRefreshTestItemStatuses) GetStatusByIDs(_ context.Context, ids []string) (map[string]string, error) {
 	r.reads++
+	if r.reads <= r.goneReads {
+		return map[string]string{}, nil
+	}
 	status := "matched"
 	if r.reads <= r.pendingReads {
 		status = "pending"

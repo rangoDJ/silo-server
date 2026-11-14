@@ -815,13 +815,14 @@ func (e *ItemRefreshExecutor) resolveCompleteRefreshTargets(ctx context.Context,
 	// A series root match links the root's files to a pending skeleton before
 	// it asks the providers; the provider match can then merge that skeleton
 	// into another item. Until the match finishes, the skeleton isn't the
-	// rebuilt item.
+	// rebuilt item. An item gone since the file read was merged away; the next
+	// read finds the files on the item that replaced it.
 	if e.itemStatuses != nil && isSeriesTarget(req.RequestedType) {
 		statuses, err := e.itemStatuses.GetStatusByIDs(ctx, []string{refreshContentID})
 		if err != nil {
 			return "", "", unlinked, fmt.Errorf("loading rebuilt item status: %w", err)
 		}
-		if strings.EqualFold(strings.TrimSpace(statuses[refreshContentID]), "pending") {
+		if status, ok := statuses[refreshContentID]; !ok || strings.EqualFold(strings.TrimSpace(status), "pending") {
 			return "", "", unlinked, errRebuiltItemMatching
 		}
 	}
