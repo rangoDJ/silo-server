@@ -38,6 +38,38 @@ func TestCopyGroupAssemblerMatchesNearbyKeyframes(t *testing.T) {
 	}
 }
 
+// A restart whose seek lands among evenly spaced keyframes: two groups 40 ms
+// apart fit keyframes 0 and 1 alike. The run waits for a group that tells
+// them apart instead of taking the later one, which would misplace the third
+// group and reject a valid file.
+func TestCopyGroupAssemblerWaitsOutAmbiguousAnchors(t *testing.T) {
+	dir := t.TempDir()
+	plan := &copySegmentPlan{
+		keyframes: []float64{0, .04, .08, 2.2, 4.2},
+		firstKey:  []int{0, 3, 4},
+		durations: []float64{2.2, 2, 2},
+	}
+	a := newCopyGroupAssembler(dir, plan)
+	a.startRun(1, "copy", 0)
+	if err := os.WriteFile(filepath.Join(dir, "init.mp4"), testInit(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// FFmpeg landed on keyframe 0 with an 80 ms shift.
+	for n, at := range []float64{.08, .12, .16, 2.28} {
+		group := box("moof", box("traf", fullBox("tfhd", 0, 0x20000, u32(1)), fullBox("tfdt", 1, 0, u64(uint64(math.Round(at*12800))))))
+		path := filepath.Join(dir, fmt.Sprintf("g%d", n))
+		if err := os.WriteFile(path, group, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.mapGroupLocked(a.run, path, group); err != nil {
+			t.Fatalf("group %d at %.2fs: %v", n, at, err)
+		}
+	}
+	if !a.run.anchored || a.run.anchorKey != 0 || len(a.run.groups) != 4 {
+		t.Fatalf("anchored %v at key %d with %d groups; want key 0 and all four placed", a.run.anchored, a.run.anchorKey, len(a.run.groups))
+	}
+}
+
 func TestCopyGroupAssemblerFinishesBeforeProcessDone(t *testing.T) {
 	dir := t.TempDir()
 	plan := &copySegmentPlan{durations: []float64{2}, keyframes: []float64{0}, firstKey: []int{0}}

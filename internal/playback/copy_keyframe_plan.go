@@ -407,7 +407,9 @@ func (s *TranscodeSession) plannedRunCoversSince(segNum int, seenGeneration time
 	if s.copyGroups.hasSegment(segNum) {
 		return true
 	}
-	return progress.Running && segNum >= progress.StartSegmentNumber &&
+	// A missing segment at or behind the head was pruned after the run
+	// passed it, and the run won't write it again.
+	return progress.Running && segNum > progress.ProducedHead && segNum >= progress.StartSegmentNumber &&
 		segNum <= progress.ProducedHead+plannedWaitSegments
 }
 

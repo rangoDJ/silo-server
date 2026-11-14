@@ -74,9 +74,9 @@ type copyGroupRun struct {
 	trackID   uint32
 	timescale uint32
 	anchored  bool
-	// pending is the run's first group while it waits for the second to
-	// anchor the run (anchorLocked).
-	pending *copyGroupFile
+	// pending holds the run's first groups until they show which keyframe
+	// the run starts at (anchorLocked).
+	pending []copyGroupFile
 	// offset is the run's constant shift between a group's presentation time
 	// and its source keyframe time, in seconds.
 	offset float64
@@ -245,7 +245,8 @@ func (a *copyGroupAssembler) stopRun() {
 
 // scan reads the run's new groups and assembles every segment whose groups
 // are all present. It returns the error that stops the run's assembly, once.
-// The final scan, after FFmpeg exits, anchors a run that wrote one group.
+// The final scan, after FFmpeg exits, anchors a run whose groups never
+// settled its first keyframe.
 func (a *copyGroupAssembler) scan(final bool) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -269,9 +270,9 @@ func (a *copyGroupAssembler) scan(final bool) error {
 		}
 		run.nextFile++
 	}
-	if final && run.pending != nil {
-		if err := a.anchorLocked(run, *run.pending, nil); err != nil {
-			return a.breakRun(run, filepath.Base(run.pending.path), err)
+	if final && !run.anchored && len(run.pending) > 0 {
+		if err := a.anchorLocked(run, true); err != nil {
+			return a.breakRun(run, filepath.Base(run.pending[len(run.pending)-1].path), err)
 		}
 	}
 	return a.assembleLocked(run)
@@ -323,51 +324,81 @@ func (a *copyGroupAssembler) mapGroupLocked(run *copyGroupRun, path string, data
 	// keyframe.
 	at += a.plan.inputStart
 	if !run.anchored {
-		if run.pending == nil {
-			// The run's first group: which keyframe it starts at is known
-			// once the next group shows how far apart they are.
-			run.pending = &copyGroupFile{path: path, at: at}
+		// Which keyframe the run starts at is known once the next groups
+		// show how far apart they are.
+		run.pending = append(run.pending, copyGroupFile{path: path, at: at})
+		if len(run.pending) < 2 {
 			return nil
 		}
-		return a.anchorLocked(run, *run.pending, &copyGroupFile{path: path, at: at})
+		return a.anchorLocked(run, false)
 	}
 	return a.placeLocked(run, path, at)
 }
 
-// anchorLocked places a run's first group, and its second when there is one,
-// and fixes the run's offset from them.
+// anchorGroups bounds how many groups a run holds back while their keyframe
+// is ambiguous. Groups at evenly spaced keyframes fit more than one; past
+// this many, the latest that fits is taken.
+const anchorGroups = 8
+
+// anchorShift bounds the shifts that make a run's first keyframe ambiguous.
+// A run is shifted by a B-frame delay at most, so of two keyframes the
+// groups fit, one that would put the shift past this is not a contender.
+const anchorShift = 0.5
+
+// anchorLocked places a run's pending groups once they show the keyframe the
+// run starts at, and fixes the run's offset from them. It waits for more
+// groups while that is ambiguous, unless final.
 //
 // The first group starts at the keyframe FFmpeg's seek landed on: one at or
 // before its start, since the run's timestamps are the source's shifted
 // later, never earlier (a B-frame delay, the gap between the file's start and
 // its first keyframe, or none), and at or before the keyframe the seek aimed
 // at. When keyframes are closer together than the shift, more than one fits.
-// Consecutive groups start at consecutive keyframes, so the one whose gap to
-// the next keyframe matches the gap to the second group is it; of several,
-// the latest. A run from the start is anchored at the first keyframe.
-func (a *copyGroupAssembler) anchorLocked(run *copyGroupRun, first copyGroupFile, second *copyGroupFile) error {
+// Consecutive groups start at consecutive keyframes, so the keyframe it is
+// has the gaps to the following keyframes the groups have to the first. Of
+// those, it waits while more than one would leave a shift within
+// anchorShift. With a single group, or groups that still fit more than one,
+// the latest is taken: the smallest shift. A run from the start is anchored
+// at the first keyframe.
+func (a *copyGroupAssembler) anchorLocked(run *copyGroupRun, final bool) error {
 	keys := a.plan.keyframes
+	first := run.pending[0]
 	last := min(sort.SearchFloat64s(keys, first.at+groupTimeTolerance)-1, a.plan.restartKeyframe(run.startSegment))
 	if last < 0 {
 		return fmt.Errorf("%w: first group at %.3fs precedes every keyframe", errGroupsMismatchPlan, first.at)
 	}
-	i := last
-	if second != nil {
-		gap := second.at - first.at
-		i = -1
-		for k := last; k >= 0; k-- {
-			if k+1 < len(keys) && math.Abs(keys[k+1]-keys[k]-gap) <= 2*groupTimeTolerance {
-				i = k
-				break
+	fits := func(k int) bool {
+		for j, g := range run.pending[1:] {
+			next := k + j + 1
+			if next >= len(keys) || math.Abs(keys[next]-keys[k]-(g.at-first.at)) > 2*groupTimeTolerance {
+				return false
 			}
 		}
-		if i < 0 {
-			return fmt.Errorf("%w: groups at %.3fs and %.3fs match no consecutive keyframes", errGroupsMismatchPlan, first.at, second.at)
+		return true
+	}
+	i, near := -1, 0
+	for k := last; k >= 0 && (i < 0 || first.at-keys[k] <= anchorShift); k-- {
+		if !fits(k) {
+			continue
 		}
+		if i < 0 {
+			i = k
+		}
+		if first.at-keys[k] <= anchorShift {
+			near++
+		}
+	}
+	if i < 0 {
+		return fmt.Errorf("%w: groups at %.3fs to %.3fs match no consecutive keyframes", errGroupsMismatchPlan,
+			first.at, run.pending[len(run.pending)-1].at)
+	}
+	if near > 1 && !final && len(run.pending) < anchorGroups {
+		return nil
 	}
 	run.offset = first.at - keys[i]
 	run.anchorKey = i
 	run.anchored = true
+	pending := run.pending
 	run.pending = nil
 	if !a.haveTimeline {
 		a.timeline, a.haveTimeline = run.offset, true
@@ -375,11 +406,10 @@ func (a *copyGroupAssembler) anchorLocked(run *copyGroupRun, first copyGroupFile
 		a.recordTimelineLocked()
 	}
 	run.shift = a.timeline - run.offset
-	if err := a.placeLocked(run, first.path, first.at); err != nil {
-		return err
-	}
-	if second != nil {
-		return a.placeLocked(run, second.path, second.at)
+	for _, g := range pending {
+		if err := a.placeLocked(run, g.path, g.at); err != nil {
+			return err
+		}
 	}
 	return nil
 }

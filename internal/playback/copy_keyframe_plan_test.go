@@ -308,6 +308,23 @@ func TestPlannedRestartQueuedBehindAnotherKeepsTheNewRun(t *testing.T) {
 		}
 	}
 
+	// The new run can have passed the segment already, and the pruner removed
+	// it behind the player. That run won't write it again, so the request
+	// restarts.
+	passed := newCopyGroupAssembler(t.TempDir(), plan)
+	passed.startRun(20, "", 1)
+	for n := 20; n <= 25; n++ {
+		passed.assembled[n] = true
+	}
+	if _, head, _, _ := passed.progress(); head != 25 {
+		t.Fatalf("head %d, want 25", head)
+	}
+	passed.forget(22, 1)
+	pastHead := &TranscodeSession{opts: plannedOpts(), copyPlan: plan, copyGroups: passed, running: true, generationStartedAt: current}
+	if pastHead.plannedRunCoversSince(22, seen) {
+		t.Error("plannedRunCoversSince(22) = true for a segment the new run passed and the pruner removed")
+	}
+
 	target, ok, err := s.RestartSegmentSince(t.Context(), 21, seen)
 	if err != nil || !ok || target.StartSegmentNumber != 21 {
 		t.Fatalf("RestartSegmentSince = %+v, %v, %v; want segment 21's target", target, ok, err)
