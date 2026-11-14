@@ -191,6 +191,7 @@ func TestAdmitSearchMatchWithoutAnAuthorNeedsTheTitleToIdentifyTheBook(t *testin
 		{name: "the same title", want: "Raw Stream", candidate: "Raw Stream", accept: true},
 		{name: "an author-prefixed folder", want: "Andy Weir - Project Hail Mary", candidate: "Project Hail Mary", accept: true},
 		{name: "an ampersand", want: "Pride & Prejudice", candidate: "Pride and Prejudice", accept: true},
+		{name: "a dropped leading article", want: "The Hobbit", candidate: "Hobbit", accept: true},
 		{name: "a partial match carrying the item's ID", want: "Raw Stream", candidate: "Raw",
 			ids: map[string]string{"audible": "B0SAME"}, existing: map[string]string{"audible": "B0SAME"}, accept: true},
 		{name: "a partial match beside another provider's ID", want: "Raw Stream", candidate: "Raw",

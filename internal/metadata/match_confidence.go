@@ -172,18 +172,27 @@ func titleAloneIdentifies(want, candidate string) bool {
 	return false
 }
 
-// identityWords is the set of a normalised title's content words, without a
-// volume marker word that precedes a number: "Phoenix Brothers Series 2" and
-// "Phoenix Brothers Book 2" name the same volume, and selection has already
-// rejected a volume that disagrees.
+// identityWords is the set of a normalised title's words, without stopwords
+// ("The Hobbit" and "Hobbit") or a volume marker word that precedes a number
+// ("Phoenix Brothers Series 2" and "Phoenix Brothers Book 2" name the same
+// volume, and selection has already rejected a volume that disagrees). A title
+// made only of stopwords keeps them all.
 func identityWords(normalised string) map[string]struct{} {
-	fields := contentWords(strings.Fields(normalised))
+	fields := strings.Fields(normalised)
 	words := make(map[string]struct{}, len(fields))
 	for i, f := range fields {
+		if _, stop := titleStopwords[f]; stop {
+			continue
+		}
 		if i+1 < len(fields) && volumeMarkerRE.MatchString(f+" "+fields[i+1]) {
 			continue
 		}
 		words[f] = struct{}{}
+	}
+	if len(words) == 0 {
+		for _, f := range fields {
+			words[f] = struct{}{}
+		}
 	}
 	return words
 }
