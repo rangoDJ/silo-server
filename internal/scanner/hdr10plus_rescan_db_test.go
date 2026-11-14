@@ -125,12 +125,12 @@ func TestRescanClearsTheHDR10PlusNoFrameMarkDB(t *testing.T) {
 	}
 
 	backfiller := NewHDR10PlusBackfiller(repo, noFrame)
-	backfiller.readFrame = func(ctx context.Context, ffprobePath, filePath, streamSpecifier string) ([]ffprobeSideData, error) {
+	backfiller.readFrame = func(ctx context.Context, ffprobePath, filePath, streamSpecifier string) (firstVideoFrame, error) {
 		if filePath != moviePath {
 			// Another test's row: leave it untouched.
-			return nil, errors.New("not this test's file")
+			return firstVideoFrame{}, errors.New("not this test's file")
 		}
-		return probeVideoFrameSideData(ctx, ffprobePath, filePath, streamSpecifier)
+		return probeFirstVideoFrame(ctx, ffprobePath, filePath, streamSpecifier)
 	}
 	if _, err := backfiller.Run(ctx, nil); err != nil {
 		t.Fatalf("backfill: %v", err)

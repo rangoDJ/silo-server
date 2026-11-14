@@ -80,6 +80,52 @@ the delivery arrived is scanned as it stands. Deleting the last folder under a
 library root leaves that root suspect-empty, so its titles stay protected
 like any other emptied root.
 
+## Files without video
+
+A movie, series, or mixed library picks its files by extension, so it also
+walks files that hold no video stream: a soundtrack saved as `.mkv`, an
+audio-only transport stream. Such a file is not cataloged
+(`internal/scanner/no_video.go`). The playback planner has no route for a
+movie row without video, and the probe repair checks would ask for a new probe
+of it on every scan and every playback decision.
+
+- **The verdict needs two successful probes.** The first lists no video stream
+  (embedded cover art is not one). The second reads further, up to 120 seconds
+  or 100 MB (`deepProbeLimits`), because MPEG transport and program streams
+  and FLV announce a stream only when its first packet arrives. When the
+  second probe finds video, the row is written from it. A probe that fails,
+  times out, or is rejected decides nothing, and the file is cataloged as
+  before. A later scan probes it again and judges it then, except after a
+  rejection: a scan does not probe rejected bytes again until the file's
+  size or modification time changes.
+- **The verdict is stored by path** in `scanner_no_video_files`, with the
+  file's size, modification time, and OSHash. It holds only while the file at
+  the path still has that size and modification time, so replacing the file,
+  or touching it, has it judged again. Rows are removed only with their
+  library; a stale one costs a stat per scan.
+- **Later scans drop the path before anything else** (`dropNoVideoPaths`): it
+  takes no part in root or group inference and is neither hashed nor probed.
+  The scan that first finds the file has already inferred from its path, and
+  the next complete scan prunes what that left.
+- **A row already written for the file is marked `missing_since`**, although
+  the file is still on disk, and from there it is a removed file: membership
+  reconciliation, the item hold, and the trash sweep above apply unchanged,
+  and the scan counts it under `Missing` so the change is published. The
+  verdict is written before the row is marked, so a scan cut short between
+  the two leaves a present row that the next scan marks. Marking is fenced to
+  the size and modification time the scan read, and a row already missing
+  keeps its `missing_since`.
+- **A failed probe does not bring the file back.** The path is dropped before
+  any probe runs. A renamed file is not relinked to a row whose stored probe
+  or verdict shows no video; it is probed at the new path. If that probe
+  returns nothing and the library holds a verdict for the same OSHash, size,
+  and modification time, the file waits for a later scan instead of being
+  cataloged unprobed. OSHash samples the head and tail only, so a match never
+  stands in for a successful probe.
+
+Extras, podcast, audiobook, and ebook libraries are not judged. Nothing here
+touches the file on disk.
+
 ## Renamed and moved files
 
 A video file that appears at a new path takes over the row of the file it was
@@ -103,7 +149,8 @@ on the path) is the file, but only when exactly one does; otherwise the file
 gets a new row, since picking between equal claims could hand one file's
 state to another. A copy whose original is still in place, a file under an
 offline or suspect-empty root, and a file whose bytes match no vanished row
-also get a new row. Each library root is probed once per lookup, same-title
+also get a new row, and so does a file whose only matching rows describe a
+file without video (see above). Each library root is probed once per lookup, same-title
 rows are probed first, and probing stops once the pick is settled.
 
 What the new path says about the title decides the row's links:
@@ -159,7 +206,26 @@ What the new path says about the title decides the row's links:
   become another title: the stand-in is missing, so serving an original, its
   subtitles, or its embedded tracks is refused as for any missing file, and
   the download is deleted with the stand-in after the grace, as it was with
-  the missing row before rows were reused. A prepared (remux or transcode) copy is served,
+  the missing row before rows were reused. Registration cannot slip a
+  download past the move: every statement that writes a download's file (in
+  `internal/downloads/registration_fence.go`) locks the file row
+  `FOR SHARE` in that statement and writes only while the file is present
+  and linked to the download's own content and episode, answering the
+  missing-file not-found otherwise. A request that registers several
+  downloads at once (a season, a series, or a managed batch) writes none of
+  its new downloads when one is refused; a monitor sync skips the refused
+  episode and registers it on a later sync, as it does an episode with no
+  file. A managed request replaces entries that already exist before it
+  inserts new ones, in separate statements, so a replacement made earlier in a
+  refused request stays, as it does when the insert fails for any other
+  reason. The retitle, and a reclaim of a stand-in, lock the row
+  `FOR UPDATE` in a statement of their own first, before the statement that
+  moves downloads, in one transaction. A registration that holds the row
+  first commits before that statement takes its snapshot, so its download
+  moves with the others; one that waits rereads the retitled row and writes
+  nothing. A single statement would not do: under READ COMMITTED its snapshot
+  predates its wait for the lock. The locks are database row locks, so this
+  holds across API servers. A prepared (remux or transcode) copy is served,
   and prepared again, only for a download on the file row it was made from,
   so a parked download is not given the copy of the row it left; a missing
   row's own copies are served as before. Root and group claims are untouched:
