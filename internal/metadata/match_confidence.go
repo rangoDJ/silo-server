@@ -146,8 +146,11 @@ func normaliseTitle(s string) string {
 // floor TitleScore's containment rule already uses. That keeps a folder title
 // with an author or series prefix ("Andy Weir - Project Hail Mary") and a
 // provider title with a series suffix, and rejects a short title that is only
-// a part of a longer one ("Dune" and "Dune Messiah"). Unspaced scripts
-// normalise to one token, so they fall back to plain containment.
+// a part of a longer one ("Dune" and "Dune Messiah"). Containment counts
+// whole words only, so "The Green Mile" doesn't cover "The Green Milestone";
+// unspaced scripts normalise to one token, so they fall back to plain
+// containment. A repeated word counts each time: "New York, New York" is not
+// "New York".
 func titleAloneIdentifies(want, candidate string) bool {
 	w, c := normaliseTitle(want), normaliseTitle(candidate)
 	if w == "" || c == "" {
@@ -157,7 +160,7 @@ func titleAloneIdentifies(want, candidate string) bool {
 		return true
 	}
 	shorter := min(len(w), len(c))
-	if shorter >= minContainmentLen && (strings.Contains(w, c) || strings.Contains(c, w)) {
+	if shorter >= minContainmentLen && (containsTitle(w, c) || containsTitle(c, w)) {
 		return true
 	}
 	ws, cs := identityWords(w), identityWords(c)
@@ -172,14 +175,24 @@ func titleAloneIdentifies(want, candidate string) bool {
 	return false
 }
 
-// identityWords is the set of a normalised title's words, without stopwords
+// containsTitle reports whether normalised title outer holds inner. For
+// spaced titles it matches whole words only; a title with no space, as an
+// unspaced script normalises to, is matched as plain text.
+func containsTitle(outer, inner string) bool {
+	if !strings.Contains(inner, " ") {
+		return strings.Contains(outer, inner)
+	}
+	return strings.Contains(" "+outer+" ", " "+inner+" ")
+}
+
+// identityWords counts a normalised title's words, without stopwords
 // ("The Hobbit" and "Hobbit") or a volume marker word that precedes a number
 // ("Phoenix Brothers Series 2" and "Phoenix Brothers Book 2" name the same
 // volume, and selection has already rejected a volume that disagrees). A title
 // made only of stopwords keeps them all.
-func identityWords(normalised string) map[string]struct{} {
+func identityWords(normalised string) map[string]int {
 	fields := strings.Fields(normalised)
-	words := make(map[string]struct{}, len(fields))
+	words := make(map[string]int, len(fields))
 	for i, f := range fields {
 		if _, stop := titleStopwords[f]; stop {
 			continue
@@ -187,19 +200,20 @@ func identityWords(normalised string) map[string]struct{} {
 		if i+1 < len(fields) && volumeMarkerRE.MatchString(f+" "+fields[i+1]) {
 			continue
 		}
-		words[f] = struct{}{}
+		words[f]++
 	}
 	if len(words) == 0 {
 		for _, f := range fields {
-			words[f] = struct{}{}
+			words[f]++
 		}
 	}
 	return words
 }
 
-func wordSubset(a, b map[string]struct{}) bool {
-	for w := range a {
-		if _, ok := b[w]; !ok {
+// wordSubset reports whether every word of a appears in b at least as often.
+func wordSubset(a, b map[string]int) bool {
+	for w, n := range a {
+		if b[w] < n {
 			return false
 		}
 	}

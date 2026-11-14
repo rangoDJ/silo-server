@@ -188,6 +188,8 @@ func TestAdmitSearchMatchWithoutAnAuthorNeedsTheTitleToIdentifyTheBook(t *testin
 		{name: "two shared words", want: "Unknown Author Book", candidate: "The Book of Unknown Americans"},
 		{name: "a contained shorter title", want: "Dune Messiah", candidate: "Dune"},
 		{name: "a short title inside a longer one", want: "Dune", candidate: "Dune Messiah"},
+		{name: "a title inside a longer word", want: "The Green Mile", candidate: "The Green Milestone"},
+		{name: "a repeated word", want: "New York, New York", candidate: "New York"},
 		{name: "the same title", want: "Raw Stream", candidate: "Raw Stream", accept: true},
 		{name: "an author-prefixed folder", want: "Andy Weir - Project Hail Mary", candidate: "Project Hail Mary", accept: true},
 		{name: "an ampersand", want: "Pride & Prejudice", candidate: "Pride and Prejudice", accept: true},
