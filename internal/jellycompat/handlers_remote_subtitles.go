@@ -176,9 +176,16 @@ func (h *RemoteSubtitlesHandler) HandleDownload(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusNotFound, "NotFound", "Subtitle not found")
 		return
 	}
-	// The result must be one searched for this item: its file has to be one
-	// of the item's versions the viewer can see.
-	if _, ok := h.itemFile(w, r, session, h.codec.EncodeIntID(EncodedIDMediaSource, int64(token.FileID))); !ok {
+	// The result must be one searched for this item: its file has to be the
+	// one the route resolves to, one of the item's versions the viewer can
+	// see. A route naming a media source resolves to that source, so a result
+	// for another version or item is refused rather than stored there.
+	fileID, ok := h.itemFile(w, r, session, h.codec.EncodeIntID(EncodedIDMediaSource, int64(token.FileID)))
+	if !ok {
+		return
+	}
+	if fileID != token.FileID {
+		writeError(w, http.StatusNotFound, "NotFound", "Subtitle not found")
 		return
 	}
 	if h.demoRestricted(r.Context()) {

@@ -52,36 +52,74 @@ func testRemoteSubtitleToken(t *testing.T, token remoteSubtitleToken) string {
 // (#3205). The search runs for the item's media file, or the media source the
 // client names; a download stores the result for the file it was found for,
 // and only a file of that item.
-func TestRemoteSubtitleSearchAndDownload(t *testing.T) {
+// remoteSubtitleHarness serves the remote subtitle routes for movie-1, whose
+// versions are files 11 and 12.
+type remoteSubtitleHarness struct {
+	codec   *ResourceIDCodec
+	itemID  string
+	content *countingContentService
+}
+
+func newRemoteSubtitleHarness() *remoteSubtitleHarness {
 	codec := NewResourceIDCodec()
-	itemID := codec.EncodeStringID(EncodedIDItem, "movie-1")
-	content := &countingContentService{episodeDetail: &upstreamItemDetail{ContentID: "movie-1", Versions: []catalog.FileVersion{{FileID: 11}, {FileID: 12}}}}
-	newRouter := func(service RemoteSubtitleService, settings SettingsReader) chi.Router {
-		h := NewRemoteSubtitlesHandler(content, codec, nil, func() RemoteSubtitleService { return service }, settings)
-		r := chi.NewRouter()
-		r.Get("/Items/{id}/RemoteSearch/Subtitles/{language}", h.HandleSearch)
-		r.Post("/Items/{id}/RemoteSearch/Subtitles/{subtitleId}", h.HandleDownload)
-		return r
+	return &remoteSubtitleHarness{
+		codec:   codec,
+		itemID:  codec.EncodeStringID(EncodedIDItem, "movie-1"),
+		content: &countingContentService{episodeDetail: &upstreamItemDetail{ContentID: "movie-1", Versions: []catalog.FileVersion{{FileID: 11}, {FileID: 12}}}},
 	}
-	serve := func(r chi.Router, method, target string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(method, target, nil)
-		req = req.WithContext(context.WithValue(req.Context(), compatSessionKey, &Session{Token: "token-1", StreamAppUserID: 7, ProfileID: "profile-1"}))
-		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, req)
-		return rec
+}
+
+func (h *remoteSubtitleHarness) router(service RemoteSubtitleService, settings SettingsReader) chi.Router {
+	handler := NewRemoteSubtitlesHandler(h.content, h.codec, nil, func() RemoteSubtitleService { return service }, settings)
+	r := chi.NewRouter()
+	r.Get("/Items/{id}/RemoteSearch/Subtitles/{language}", handler.HandleSearch)
+	r.Post("/Items/{id}/RemoteSearch/Subtitles/{subtitleId}", handler.HandleDownload)
+	return r
+}
+
+func (h *remoteSubtitleHarness) serve(r chi.Router, method, target string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, target, nil)
+	req = req.WithContext(context.WithValue(req.Context(), compatSessionKey, &Session{Token: "token-1", StreamAppUserID: 7, ProfileID: "profile-1"}))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	return rec
+}
+
+func (h *remoteSubtitleHarness) search(t *testing.T, r chi.Router, query string) []remoteSubtitleInfo {
+	t.Helper()
+	rec := h.serve(r, http.MethodGet, "/Items/"+h.itemID+"/RemoteSearch/Subtitles/eng"+query)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("search status = %d: %s", rec.Code, rec.Body.String())
 	}
-	search := func(t *testing.T, r chi.Router, query string) []remoteSubtitleInfo {
-		t.Helper()
-		rec := serve(r, http.MethodGet, "/Items/"+itemID+"/RemoteSearch/Subtitles/eng"+query)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("search status = %d: %s", rec.Code, rec.Body.String())
-		}
-		var out []remoteSubtitleInfo
-		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-			t.Fatal(err)
-		}
-		return out
+	var out []remoteSubtitleInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
 	}
+	return out
+}
+
+// A download through a route that names a media source stores only a result
+// found for that source; a result for another version is refused, not stored
+// on the file it names.
+func TestRemoteSubtitleDownloadThroughAMediaSource(t *testing.T) {
+	h := newRemoteSubtitleHarness()
+	h.codec.SetMediaSourceOwnerLookup(movieOwner{})
+	service := &fakeRemoteSubtitles{}
+	r := h.router(service, nil)
+	id := h.search(t, r, "?MediaSourceId="+h.codec.EncodeIntID(EncodedIDMediaSource, 12))[0].ID
+	other := h.codec.EncodeIntID(EncodedIDMediaSource, 11)
+	if rec := h.serve(r, http.MethodPost, "/Items/"+other+"/RemoteSearch/Subtitles/"+id); rec.Code != http.StatusNotFound || len(service.downloads) != 0 {
+		t.Fatalf("download through media source 11 of a result for file 12: status %d, downloads %+v; want 404 and none", rec.Code, service.downloads)
+	}
+	own := h.codec.EncodeIntID(EncodedIDMediaSource, 12)
+	if rec := h.serve(r, http.MethodPost, "/Items/"+own+"/RemoteSearch/Subtitles/"+id); rec.Code != http.StatusNoContent || len(service.downloads) != 1 {
+		t.Fatalf("download through its own media source: status %d, downloads %+v; want 204 and one", rec.Code, service.downloads)
+	}
+}
+
+func TestRemoteSubtitleSearchAndDownload(t *testing.T) {
+	h := newRemoteSubtitleHarness()
+	codec, itemID, newRouter, serve, search := h.codec, h.itemID, h.router, h.serve, h.search
 
 	t.Run("search", func(t *testing.T) {
 		service := &fakeRemoteSubtitles{}
